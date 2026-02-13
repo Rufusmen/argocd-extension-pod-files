@@ -4,8 +4,20 @@
 
 replicaCount: 1
 
+# Multi-cluster support configuration
+multiCluster:
+  # Enable multi-cluster support (requires RBAC to read ArgoCD cluster secrets)
+  enabled: true
+  # ArgoCD namespace where cluster secrets are stored
+  argocdNamespace: "argocd"
+
+# Environment variables for the container
+env:
+  - name: ARGOCD_NAMESPACE
+    value: "argocd"
+
 image:
-  repository: ghcr.io/wei840222/argocd-extension-pod-files
+  repository: ghcr.io/rufusmen/argocd-extension-pod-files
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""

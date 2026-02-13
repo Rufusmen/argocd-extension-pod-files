@@ -13,7 +13,10 @@ function App({ application, resource }) {
   const [isUploadButtonPending, setIsUploadButtonPending] = useState(false)
 
   const openByBlob = async (download = false) => {
-    const res = await fetch(`/extensions/pod-files/files?namespace=${resource?.metadata?.namespace}&pod=${resource?.metadata?.name}&container=${container}&path=${filePath}`, {
+    const clusterUrl = application?.spec?.destination?.server || ''
+    const clusterName = application?.spec?.destination?.name || ''
+
+    const res = await fetch(`/extensions/pod-files/files?namespace=${resource?.metadata?.namespace}&pod=${resource?.metadata?.name}&container=${container}&path=${filePath}&clusterUrl=${encodeURIComponent(clusterUrl)}&clusterName=${encodeURIComponent(clusterName)}`, {
       headers: {
         'ArgoCD-Project-Name': application?.spec?.project,
         'ArgoCD-Application-Name': `${application?.metadata?.namespace}:${application?.metadata?.name}`
@@ -76,7 +79,10 @@ function App({ application, resource }) {
           const data = new FormData()
           data.append('file', file, file.name)
 
-          await fetch(`/extensions/pod-files/files?namespace=${resource?.metadata?.namespace}&pod=${resource?.metadata?.name}&container=${container}&path=${filePath}`, {
+          const clusterUrl = application?.spec?.destination?.server || ''
+          const clusterName = application?.spec?.destination?.name || ''
+
+          await fetch(`/extensions/pod-files/files?namespace=${resource?.metadata?.namespace}&pod=${resource?.metadata?.name}&container=${container}&path=${filePath}&clusterUrl=${encodeURIComponent(clusterUrl)}&clusterName=${encodeURIComponent(clusterName)}`, {
             method: 'POST',
             headers: {
               'ArgoCD-Project-Name': application?.spec?.project,
