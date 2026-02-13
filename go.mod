@@ -1,6 +1,6 @@
 module github.com/rufusmen/argocd-extension-pod-files
 
-go 1.23
+go 1.22.5
 
 require (
 	github.com/gin-contrib/static v1.1.2
