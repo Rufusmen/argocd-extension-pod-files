@@ -1,4 +1,4 @@
-FROM node:22.4.0-bookworm as ui-builder
+FROM node:22.4.0-bookworm AS ui-builder
 
 WORKDIR /src
 
@@ -9,11 +9,11 @@ RUN npm i --frozen-lockfile
 ADD ./ui ./
 
 RUN npm run build && \
-    mkdir ./resources && \
+    mkdir -p ./resources && \
     cp ./dist/assets/index-*.js ./resources/extension-pod-files.js && \
     tar -czvf extension.tar.gz ./resources
 
-FROM golang:1.22.5-bookworm as builder
+FROM golang:1.22.5-bookworm AS builder
 
 WORKDIR /src
 
@@ -44,7 +44,7 @@ ARG gid=1000
 RUN groupadd -g ${gid} ${group} \
     && useradd -l -u ${uid} -g ${gid} -m -s /bin/bash ${user}
 
-ENV HOME /home/argocd-extension-pod-files
+ENV HOME=/home/argocd-extension-pod-files
 
 RUN mkdir -p ${HOME} && mkdir -p ${HOME}/ui
 
