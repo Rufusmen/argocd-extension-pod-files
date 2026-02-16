@@ -87,7 +87,7 @@ resources:
 volumes:
 - name: tmp
   emptyDir:
-    sizeLimit: 5Gi
+    sizeLimit: 4Gi
 
 # Additional volumeMounts on the output Deployment definition.
 volumeMounts:
