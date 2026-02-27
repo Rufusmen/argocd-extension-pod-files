@@ -54,8 +54,11 @@ func NewClusterCredentialManager() (*ClusterCredentialManager, error) {
 	}, nil
 }
 
-func (m *ClusterCredentialManager) GetClusterConfig(clusterURL string) (*ClusterConfig, error) {
-	if clusterURL == "" || clusterURL == "https://kubernetes.default.svc" {
+func (m *ClusterCredentialManager) GetClusterConfig(clusterURL string, clusterName string) (*ClusterConfig, error) {
+	if clusterURL == "" && clusterName == "" {
+		return &ClusterConfig{IsInCluster: true}, nil
+	}
+	if clusterURL == "https://kubernetes.default.svc" {
 		return &ClusterConfig{IsInCluster: true}, nil
 	}
 
@@ -67,12 +70,27 @@ func (m *ClusterCredentialManager) GetClusterConfig(clusterURL string) (*Cluster
 	}
 
 	for _, secret := range secrets.Items {
-		if m.matchesClusterURL(&secret, clusterURL) {
+		if clusterURL != "" && m.matchesClusterURL(&secret, clusterURL) {
+			return m.parseClusterSecret(&secret)
+		}
+		if clusterName != "" && m.matchesClusterName(&secret, clusterName) {
 			return m.parseClusterSecret(&secret)
 		}
 	}
 
-	return nil, fmt.Errorf("cluster not found: %s", clusterURL)
+	identifier := clusterURL
+	if identifier == "" {
+		identifier = clusterName
+	}
+	return nil, fmt.Errorf("cluster not found: %s", identifier)
+}
+
+func (m *ClusterCredentialManager) matchesClusterName(secret *corev1.Secret, clusterName string) bool {
+	nameBytes, ok := secret.Data["name"]
+	if !ok {
+		return false
+	}
+	return string(nameBytes) == clusterName
 }
 
 func (m *ClusterCredentialManager) matchesClusterURL(secret *corev1.Secret, clusterURL string) bool {
@@ -242,11 +260,12 @@ func main() {
 		container := c.DefaultQuery("container", "")
 		filePath := c.DefaultQuery("path", "")
 		clusterURL := c.DefaultQuery("clusterUrl", "")
+		clusterName := c.DefaultQuery("clusterName", "")
 
 		var clusterConfig *ClusterConfig
 		var err error
 		if credManager != nil {
-			clusterConfig, err = credManager.GetClusterConfig(clusterURL)
+			clusterConfig, err = credManager.GetClusterConfig(clusterURL, clusterName)
 			if err != nil {
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": fmt.Sprintf("Failed to get cluster config: %v", err),
@@ -279,11 +298,12 @@ func main() {
 		container := c.DefaultQuery("container", "")
 		filePath := c.DefaultQuery("path", "")
 		clusterURL := c.DefaultQuery("clusterUrl", "")
+		clusterName := c.DefaultQuery("clusterName", "")
 
 		var clusterConfig *ClusterConfig
 		var err error
 		if credManager != nil {
-			clusterConfig, err = credManager.GetClusterConfig(clusterURL)
+			clusterConfig, err = credManager.GetClusterConfig(clusterURL, clusterName)
 			if err != nil {
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": fmt.Sprintf("Failed to get cluster config: %v", err),
