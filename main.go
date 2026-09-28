@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,18 +18,50 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	clientcmdv1 "k8s.io/client-go/tools/clientcmd/api/v1"
 )
 
+// ClusterConfig is what the backend needs to run kubectl against a target cluster.
 type ClusterConfig struct {
-	Server     string
+	Server      string
 	BearerToken string
 	CAData      []byte
+	CertData    []byte
+	KeyData     []byte
+	Insecure    bool
+	ServerName  string
 	IsInCluster bool
 }
 
+// HasCredentials reports whether the config carries a credential kubectl can use:
+// a bearer token or a client certificate with its key.
+func (c *ClusterConfig) HasCredentials() bool {
+	return c.BearerToken != "" || (len(c.CertData) > 0 && len(c.KeyData) > 0)
+}
+
+// argoClusterConfig mirrors the JSON document Argo CD stores in the `config` key
+// of a cluster secret (v1alpha1.ClusterConfig). []byte fields are base64 in JSON,
+// exactly as Argo CD writes them, so encoding/json decodes them for us.
+type argoClusterConfig struct {
+	Username           string              `json:"username,omitempty"`
+	Password           string              `json:"password,omitempty"`
+	BearerToken        string              `json:"bearerToken,omitempty"`
+	TLSClientConfig    argoTLSClientConfig `json:"tlsClientConfig"`
+	AWSAuthConfig      json.RawMessage     `json:"awsAuthConfig,omitempty"`
+	ExecProviderConfig json.RawMessage     `json:"execProviderConfig,omitempty"`
+}
+
+type argoTLSClientConfig struct {
+	Insecure   bool   `json:"insecure"`
+	ServerName string `json:"serverName,omitempty"`
+	CAData     []byte `json:"caData,omitempty"`
+	CertData   []byte `json:"certData,omitempty"`
+	KeyData    []byte `json:"keyData,omitempty"`
+}
+
 type ClusterCredentialManager struct {
-	clientset         *kubernetes.Clientset
-	argocdNamespace   string
+	clientset       *kubernetes.Clientset
+	argocdNamespace string
 }
 
 func NewClusterCredentialManager() (*ClusterCredentialManager, error) {
@@ -71,10 +103,10 @@ func (m *ClusterCredentialManager) GetClusterConfig(clusterURL string, clusterNa
 
 	for _, secret := range secrets.Items {
 		if clusterURL != "" && m.matchesClusterURL(&secret, clusterURL) {
-			return m.parseClusterSecret(&secret)
+			return parseClusterSecret(&secret)
 		}
 		if clusterName != "" && m.matchesClusterName(&secret, clusterName) {
-			return m.parseClusterSecret(&secret)
+			return parseClusterSecret(&secret)
 		}
 	}
 
@@ -106,99 +138,142 @@ func (m *ClusterCredentialManager) matchesClusterURL(secret *corev1.Secret, clus
 	return server == clusterURL
 }
 
-func (m *ClusterCredentialManager) parseClusterSecret(secret *corev1.Secret) (*ClusterConfig, error) {
+// parseClusterSecret turns an Argo CD cluster secret into a ClusterConfig.
+// It accepts a bearer token (`config.bearerToken` or the legacy `token` key) or a
+// client certificate (`config.tlsClientConfig.certData` + `keyData`), which is
+// what `argocd cluster add` stores when the kubectl context authenticates with
+// x509 certs. The returned error names the fields that were present but never
+// their values.
+func parseClusterSecret(secret *corev1.Secret) (*ClusterConfig, error) {
 	server, ok := secret.Data["server"]
 	if !ok {
-		return nil, fmt.Errorf("cluster secret missing 'server' field")
+		return nil, fmt.Errorf("cluster secret %q is missing the 'server' field", secret.Name)
 	}
 
-	config := &ClusterConfig{
-		Server:      string(server),
-		IsInCluster: false,
-	}
+	config := &ClusterConfig{Server: string(server)}
+	var notes []string
 
-	if token, ok := secret.Data["config"]; ok {
-		tokenStr := string(token)
+	if raw, ok := secret.Data["config"]; ok && strings.TrimSpace(string(raw)) != "" {
+		var ac argoClusterConfig
+		if err := json.Unmarshal(raw, &ac); err != nil {
+			return nil, fmt.Errorf("cluster secret %q has an unparsable 'config' field: %w", secret.Name, err)
+		}
 
-		if strings.Contains(tokenStr, "bearerToken") {
-			parts := strings.Split(tokenStr, "\"bearerToken\":\"")
-			if len(parts) > 1 {
-				tokenParts := strings.Split(parts[1], "\"")
-				if len(tokenParts) > 0 {
-					config.BearerToken = tokenParts[0]
-				}
-			}
+		config.BearerToken = ac.BearerToken
+		config.CAData = ac.TLSClientConfig.CAData
+		config.CertData = ac.TLSClientConfig.CertData
+		config.KeyData = ac.TLSClientConfig.KeyData
+		config.Insecure = ac.TLSClientConfig.Insecure
+		config.ServerName = ac.TLSClientConfig.ServerName
+
+		if ac.BearerToken == "" && strings.Contains(string(raw), `"bearerToken"`) {
+			notes = append(notes, "bearerToken (empty)")
+		}
+		if ac.Username != "" || ac.Password != "" {
+			notes = append(notes, "username/password [unsupported]")
+		}
+		if isSetJSON(ac.AWSAuthConfig) {
+			notes = append(notes, "awsAuthConfig [unsupported]")
+		}
+		if isSetJSON(ac.ExecProviderConfig) {
+			notes = append(notes, "execProviderConfig [unsupported]")
 		}
 	}
 
+	// Legacy layout: a bare token stored next to the server URL.
 	if config.BearerToken == "" {
 		if token, ok := secret.Data["token"]; ok {
-			config.BearerToken = string(token)
+			config.BearerToken = strings.TrimSpace(string(token))
 		}
 	}
 
-	if caData, ok := secret.Data["config"]; ok {
-		caStr := string(caData)
-		if strings.Contains(caStr, "tlsClientConfig") && strings.Contains(caStr, "caData") {
-			parts := strings.Split(caStr, "\"caData\":\"")
-			if len(parts) > 1 {
-				caParts := strings.Split(parts[1], "\"")
-				if len(caParts) > 0 {
-					decoded, err := base64.StdEncoding.DecodeString(caParts[0])
-					if err == nil {
-						config.CAData = decoded
-					}
-				}
-			}
-		}
-	}
-
-	if config.BearerToken == "" {
-		return nil, fmt.Errorf("cluster secret missing authentication credentials")
+	if !config.HasCredentials() {
+		return nil, fmt.Errorf("cluster secret %q has no usable credentials (%s); supported: bearerToken, tlsClientConfig.certData+keyData",
+			secret.Name, describeCredentials(config, notes))
 	}
 
 	return config, nil
 }
 
-// GenerateKubeconfigFile creates a temporary kubeconfig file for the cluster
-func (m *ClusterCredentialManager) GenerateKubeconfigFile(config *ClusterConfig) (string, error) {
+func isSetJSON(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "null"
+}
+
+// describeCredentials lists which credential-related fields a secret carries so a
+// rejection is explainable without leaking secret material.
+func describeCredentials(c *ClusterConfig, notes []string) string {
+	var found []string
+	if len(c.CertData) > 0 {
+		found = append(found, "certData")
+	}
+	if len(c.KeyData) > 0 {
+		found = append(found, "keyData")
+	}
+	if len(c.CAData) > 0 {
+		found = append(found, "caData")
+	}
+	found = append(found, notes...)
+	if len(found) == 0 {
+		return "no credential fields found"
+	}
+	return "found: " + strings.Join(found, ", ")
+}
+
+// generateKubeconfigFile writes a temporary kubeconfig for the target cluster and
+// returns its path. The file is JSON, which kubectl accepts as a kubeconfig, so
+// nothing is hand-templated and no value needs quoting.
+func generateKubeconfigFile(config *ClusterConfig) (string, error) {
 	if config.IsInCluster {
 		// No kubeconfig needed for in-cluster access
 		return "", nil
 	}
-
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("kubeconfig-%s.yaml", uuid.New().String()))
-
-	// Build kubeconfig content
-	kubeconfigContent := fmt.Sprintf(`apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: %s
-`, config.Server)
-
-	if len(config.CAData) > 0 {
-		kubeconfigContent += fmt.Sprintf("    certificate-authority-data: %s\n", base64.StdEncoding.EncodeToString(config.CAData))
-	} else {
-		kubeconfigContent += "    insecure-skip-tls-verify: true\n"
+	if !config.HasCredentials() {
+		return "", fmt.Errorf("cluster %s has no usable credentials", config.Server)
 	}
 
-	kubeconfigContent += fmt.Sprintf(`  name: target-cluster
-contexts:
-- context:
-    cluster: target-cluster
-    user: target-user
-  name: target-context
-current-context: target-context
-users:
-- name: target-user
-  user:
-    token: %s
-`, config.BearerToken)
+	cluster := clientcmdv1.Cluster{
+		Server:        config.Server,
+		TLSServerName: config.ServerName,
+	}
+	switch {
+	case config.Insecure:
+		// kubectl refuses a CA together with the insecure flag, so send only the flag.
+		cluster.InsecureSkipTLSVerify = true
+	case len(config.CAData) > 0:
+		cluster.CertificateAuthorityData = config.CAData
+	default:
+		// Earlier versions skipped verification whenever no CA was stored; keep
+		// that so existing registrations without a CA keep working.
+		cluster.InsecureSkipTLSVerify = true
+	}
 
-	// Write kubeconfig file with restricted permissions
-	err := os.WriteFile(tmpFile, []byte(kubeconfigContent), 0600)
+	kubeconfig := clientcmdv1.Config{
+		APIVersion: "v1",
+		Kind:       "Config",
+		Clusters: []clientcmdv1.NamedCluster{
+			{Name: "target-cluster", Cluster: cluster},
+		},
+		AuthInfos: []clientcmdv1.NamedAuthInfo{
+			{Name: "target-user", AuthInfo: clientcmdv1.AuthInfo{
+				Token:                 config.BearerToken,
+				ClientCertificateData: config.CertData,
+				ClientKeyData:         config.KeyData,
+			}},
+		},
+		Contexts: []clientcmdv1.NamedContext{
+			{Name: "target-context", Context: clientcmdv1.Context{Cluster: "target-cluster", AuthInfo: "target-user"}},
+		},
+		CurrentContext: "target-context",
+	}
+
+	data, err := json.Marshal(kubeconfig)
 	if err != nil {
+		return "", fmt.Errorf("failed to encode kubeconfig: %w", err)
+	}
+
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("kubeconfig-%s.json", uuid.New().String()))
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
 		return "", fmt.Errorf("failed to write kubeconfig: %w", err)
 	}
 
@@ -228,7 +303,7 @@ func executeKubectl(clusterConfig *ClusterConfig, args ...string) ([]byte, error
 	cmd := exec.Command("kubectl", args...)
 
 	if clusterConfig != nil && !clusterConfig.IsInCluster {
-		kubeconfigFile, err := credManager.GenerateKubeconfigFile(clusterConfig)
+		kubeconfigFile, err := generateKubeconfigFile(clusterConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate kubeconfig: %w", err)
 		}

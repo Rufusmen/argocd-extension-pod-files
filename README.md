@@ -154,6 +154,14 @@ The extension supports accessing pods across multiple Kubernetes clusters manage
 4. `kubectl cp` executes against the correct cluster
 5. Temporary files are automatically cleaned up
 
+### Supported cluster credentials
+The backend reads the `config` JSON of each Argo CD cluster secret and can authenticate with:
+
+- a bearer token (`bearerToken`, or the legacy top-level `token` key), which is what `argocd cluster add` stores for a service-account based context
+- a client certificate (`tlsClientConfig.certData` + `keyData`), which is what `argocd cluster add` stores when the kubectl context authenticates with x509 certificates (for example k3s admin kubeconfigs)
+
+`caData`, `insecure` and `serverName` are honoured for TLS verification. `execProviderConfig`, `awsAuthConfig` and basic auth are not supported; secrets using only those are rejected with an error that names the fields found.
+
 ### Configuration
 
 #### Multi-Cluster Configuration (values.yaml)
