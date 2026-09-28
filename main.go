@@ -352,17 +352,23 @@ func main() {
 
 		tmpFilePath := path.Join(os.TempDir(), tmpFilePath, uuid.New().String(), filepath.Base(filePath))
 
+		// Everything for this request lives in its own directory; remove the
+		// whole directory afterwards (os.Remove on a non-empty dir silently fails
+		// and leaked every downloaded file into /tmp).
+		defer os.RemoveAll(filepath.Dir(tmpFilePath))
+
 		// kubectl cp <some-namespace>/<some-pod>:/tmp/foo /tmp/bar
-		b, err := executeKubectl(clusterConfig, "cp", fmt.Sprintf("%s/%s:%s", namespace, pod, filePath), tmpFilePath, "-c", container)
+		// --retries makes kubectl resume from the last byte received when the
+		// exec stream ends early (seen on k3s when the reader is slower than the
+		// pod: the last few MB of a large file were dropped).
+		b, err := executeKubectl(clusterConfig, "cp", fmt.Sprintf("%s/%s:%s", namespace, pod, filePath), tmpFilePath, "-c", container, "--retries=10")
 		if err != nil {
-			defer os.Remove(filepath.Dir(tmpFilePath))
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":  fmt.Sprintf("kubectl cp exec error: %v", err),
 				"output": string(b),
 			})
 			return
 		}
-		defer os.Remove(filepath.Dir(tmpFilePath))
 
 		c.File(tmpFilePath)
 	})
@@ -395,6 +401,7 @@ func main() {
 		}
 
 		tmpFilePath := path.Join(os.TempDir(), tmpFilePath, uuid.New().String(), filepath.Base(filePath))
+		defer os.RemoveAll(filepath.Dir(tmpFilePath))
 		if err := c.SaveUploadedFile(file, tmpFilePath); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save file: %v", err)})
 			return
@@ -403,14 +410,12 @@ func main() {
 		// kubectl cp /tmp/foo <some-namespace>/<some-pod>:/tmp/bar
 		b, err := executeKubectl(clusterConfig, "cp", tmpFilePath, fmt.Sprintf("%s/%s:%s", namespace, pod, filePath), "-c", container)
 		if err != nil {
-			defer os.Remove(filepath.Dir(tmpFilePath))
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":  fmt.Sprintf("kubectl cp exec error: %v", err),
 				"output": string(b),
 			})
 			return
 		}
-		defer os.Remove(filepath.Dir(tmpFilePath))
 
 		c.String(http.StatusCreated, "Uploaded")
 	})

@@ -151,7 +151,7 @@ The extension supports accessing pods across multiple Kubernetes clusters manage
 1. The UI extracts cluster information from the ArgoCD application's destination
 2. The backend retrieves cluster credentials from ArgoCD cluster secrets
 3. A temporary kubeconfig is generated for the target cluster
-4. `kubectl cp` executes against the correct cluster
+4. `kubectl cp` executes against the correct cluster (downloads use `--retries`, so a prematurely closed exec stream is resumed from the last byte received)
 5. Temporary files are automatically cleaned up
 
 ### Supported cluster credentials
